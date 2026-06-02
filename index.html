@@ -255,6 +255,7 @@
     .time-box { min-width: 84px; font-size: 0.82rem; }
     .time-box .ms { font-size: 0.7rem; }
   }
+  .export-toggle { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #666; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -309,7 +310,7 @@
           <button class="btn" onclick="navigateAyah(1)">Next ⏭</button>
           <button class="btn" id="playSurahBtn" onclick="togglePlaySurah()">▶ Play Surah</button>
           <label class="nudge-box">Nudge <input type="number" id="nudgeInput" value="100" min="1" /> ms</label>
-          <span class="hint">Space: Play/Stop • S/Enter: Set Ayah • ↑/↓: Select • →/+: Fwd • ←/-: Back • Del: Clear</span>
+          <span class="hint">Space: Play/Stop • S/Enter: Set Ayah • ↑/↓: Select • A: Auto‑gap (+100 ms) • →/+: Fwd • ←/-: Back • Del: Clear</span>
         </div>
       </section>
       <div id="ayahList"><div style="padding:20px;color:#888;text-align:center;">Select a Surah to start editing timings.</div></div>
@@ -368,6 +369,7 @@
     let surahAyahCounts = {};
     let timings = {}, originalTimings = {};
     let completedSurahs = new Set();
+    let exportExcluded = new Set();       // keys "sura,ayah" NOT to export (only for ayah 0 & 999)
     let currentSurah = 1, selectedAyah = 1;
     let audioFiles = {}, audioURL = null;
     let isPlayingWholeSurah = false, currentPlaybackSpeed = 1;
@@ -541,6 +543,8 @@
       }
       const comp = await idbGet('completed');
       if (Array.isArray(comp)) completedSurahs = new Set(comp);
+      const exc = await idbGet('exportExcluded');
+      if (Array.isArray(exc)) exportExcluded = new Set(exc);
       const cs = await idbGet('currentSurah');
       if (typeof cs === 'number' && cs >= 1 && cs <= 114) currentSurah = cs;
       const sa = await idbGet('selectedAyah');
@@ -566,6 +570,7 @@
       if (!sqlDb) return;
       idbPut('db', sqlDb.export());
       idbPut('completed', Array.from(completedSurahs));
+      idbPut('exportExcluded', Array.from(exportExcluded));
       idbPut('currentSurah', currentSurah);
       idbPut('selectedAyah', selectedAyah);
       idbPut('playbackSpeed', currentPlaybackSpeed);
@@ -577,6 +582,7 @@
       timings = {};
       originalTimings = {};
       completedSurahs.clear();
+      exportExcluded.clear();
       saveCache();
       renderSurahList();
       renderAyahList();
@@ -694,60 +700,72 @@
 
     async function exportDb() {
       if (!sqlDb) return alert('No database.');
-      const blob = new Blob([sqlDb.export()], { type: 'application/octet-stream' });
-      if (window.showSaveFilePicker) {
-        try {
-          const h = await window.showSaveFilePicker({
-            suggestedName: 'timings.db',
-            types: [{ accept: { 'application/octet-stream': ['.db'] } }]
-          });
-          const w = await h.createWritable();
-          await w.write(blob);
-          await w.close();
-          showToast('DB exported', 'success');
-          return;
-        } catch (err) {
-          if (err.name !== 'AbortError') console.error(err);
-        }
+      const exportData = collectExportTimings();
+      const exportDb = new SQL.Database();
+      exportDb.run("CREATE TABLE timings(sura int, ayah int, time int, primary key(sura,ayah))");
+      const stmt = exportDb.prepare("INSERT OR REPLACE INTO timings VALUES (?,?,?)");
+      for (const row of exportData) {
+        stmt.run([row.sura, row.ayah, row.time]);
       }
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'timings.db';
-      a.click();
-      showToast('DB download started', 'success');
+      stmt.free();
+      const blob = new Blob([exportDb.export()], { type: 'application/octet-stream' });
+      downloadBlob(blob, 'timings.db', 'DB exported');
     }
 
     async function exportTxt() {
-      if (!timings || Object.keys(timings).length === 0) return alert('No timings.');
-      const entries = [];
-      for (const [key, time] of Object.entries(timings)) {
-        const [sura, ayah] = key.split(',').map(Number);
-        entries.push({ sura, ayah, time });
-      }
-      entries.sort((a, b) => a.sura !== b.sura ? a.sura - b.sura : a.ayah - b.ayah);
+      const exportData = collectExportTimings();
+      if (exportData.length === 0) return alert('No timings to export.');
+      exportData.sort((a, b) => a.sura !== b.sura ? a.sura - b.sura : a.ayah - b.ayah);
       let txt = 'sura\tayah\ttime\n';
-      for (const e of entries) txt += `${e.sura}\t${e.ayah}\t${e.time}\n`;
+      for (const row of exportData) {
+        txt += `${row.sura}\t${row.ayah}\t${row.time}\n`;
+      }
       const blob = new Blob([txt], { type: 'text/plain' });
+      downloadBlob(blob, 'timings.txt', 'TXT exported');
+    }
+
+    function collectExportTimings() {
+      const rows = [];
+      for (let sura = 1; sura <= 114; sura++) {
+        const count = getSurahAyahCount(sura);
+        // Always include ayahs 1..count
+        for (let a = 1; a <= count; a++) {
+          const key = `${sura},${a}`;
+          const time = timings[key] !== undefined ? timings[key] : 0;
+          rows.push({ sura, ayah: a, time });
+        }
+        // Include ayah 0 only if not excluded (checkbox checked)
+        if (!exportExcluded.has(`${sura},0`)) {
+          rows.push({ sura, ayah: 0, time: timings[`${sura},0`] || 0 });
+        }
+        // Include ayah 999 only if not excluded
+        if (!exportExcluded.has(`${sura},999`)) {
+          rows.push({ sura, ayah: 999, time: timings[`${sura},999`] || 0 });
+        }
+      }
+      return rows;
+    }
+
+    function downloadBlob(blob, name, successMsg) {
       if (window.showSaveFilePicker) {
-        try {
-          const h = await window.showSaveFilePicker({
-            suggestedName: 'timings.txt',
-            types: [{ accept: { 'text/plain': ['.txt'] } }]
-          });
+        window.showSaveFilePicker({
+          suggestedName: name,
+          types: [{ accept: { 'application/octet-stream': ['.' + name.split('.').pop()] } }]
+        }).then(async h => {
           const w = await h.createWritable();
           await w.write(blob);
           await w.close();
-          showToast('TXT exported', 'success');
-          return;
-        } catch (err) {
+          showToast(successMsg, 'success');
+        }).catch(err => {
           if (err.name !== 'AbortError') console.error(err);
-        }
+        });
+        return;
       }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'timings.txt';
+      a.download = name;
       a.click();
-      showToast('TXT download started', 'success');
+      showToast(successMsg, 'success');
     }
 
     // ==================== TIMINGS CRUD ====================
@@ -760,7 +778,7 @@
       timings[key] = t;
       if (sqlDb) sqlDb.run('INSERT OR REPLACE INTO timings VALUES (?,?,?)', [sura, ayah, t]);
       saveCache();
-      updateSurahProgress(sura);
+      if (ayah !== 0) updateSurahProgress(sura);   // ayah 0 doesn't affect progress
     }
 
     function nudgeTiming(sura, ayah, delta) {
@@ -1156,8 +1174,7 @@
       row.querySelector('.ayah-text')?.classList.toggle('edited', edited);
     }
 
-    /* ==================== BUILD AYAH ROW ====================
-       - Button shows ⏸ immediately on click to play */
+    /* ==================== BUILD AYAH ROW ==================== */
     function buildAyahRow(sura, ayah, isEnd = false) {
       const key = `${sura},${ayah}`;
       const time = timings[key] !== undefined ? timings[key] : 0;
@@ -1214,7 +1231,6 @@
           updatePlayerUI();
           isPlayingWholeSurah = false;
           updatePlaySurahButton();
-          // Immediately set button to pause symbol, revert on error
           btnPlay.textContent = '⏸';
           audio.play().catch(e => {
             console.warn('Playback failed', e);
@@ -1279,8 +1295,39 @@
       lbl.textContent = isEnd ? '999' : ayah;
       if (edited) lbl.classList.add('edited');
 
+      // Append all standard controls
       row.append(btnPlay, btnMinus, btnPlus, inp, btnDel);
-      if (!isEnd) {
+
+      // Export checkbox ONLY for ayah 0 and 999
+      if (ayah === 0 || isEnd) {
+        const exportCB = document.createElement('input');
+        exportCB.type = 'checkbox';
+        exportCB.checked = !exportExcluded.has(key);
+        exportCB.title = 'Include this row in exported DB / TXT';
+        exportCB.classList.add('export-toggle');
+        exportCB.onclick = (e) => {
+          e.stopPropagation();
+          if (exportCB.checked) {
+            exportExcluded.delete(key);
+          } else {
+            exportExcluded.add(key);
+          }
+          saveCache();
+        };
+
+        const exportLabel = document.createElement('span');
+        exportLabel.textContent = 'export';
+        exportLabel.style.fontSize = '0.8rem';
+        exportLabel.style.color = '#666';
+
+        const exportWrap = document.createElement('div');
+        exportWrap.className = 'export-toggle';
+        exportWrap.append(exportCB, exportLabel);
+        row.appendChild(exportWrap);
+      }
+
+      // Ayah text (not for ayah 0 or 999)
+      if (!isEnd && ayah !== 0) {
         const txt = quranData[`${sura},${ayah}`];
         if (txt) {
           const textDiv = document.createElement('div');
@@ -1288,10 +1335,11 @@
           textDiv.title = txt;
           textDiv.textContent = truncateAyahText(txt);
           if (edited) textDiv.classList.add('edited');
-          row.append(textDiv);
+          row.appendChild(textDiv);
         }
       }
-      row.append(lbl);
+
+      row.appendChild(lbl);
       return row;
     }
 
@@ -1305,6 +1353,9 @@
       const s = SURAH_DATA[currentSurah - 1];
       if (!s) return;
       const count = getSurahAyahCount(currentSurah);
+
+      // Add ayah 0 row
+      box.appendChild(buildAyahRow(currentSurah, 0));
 
       for (let a = 1; a <= count; a++) box.appendChild(buildAyahRow(currentSurah, a));
       box.appendChild(buildAyahRow(currentSurah, 999, true));
@@ -1334,9 +1385,8 @@
         isPlayingWholeSurah = false;
         updatePlaySurahButton();
       }
-      for (let a = 1; a <= count; a++) {
-        updateTiming(currentSurah, a, 0);
-      }
+      updateTiming(currentSurah, 0, 0);
+      for (let a = 1; a <= count; a++) updateTiming(currentSurah, a, 0);
       updateTiming(currentSurah, 999, 0);
       originalTimings = clone(timings);
       saveCache();
@@ -1347,10 +1397,16 @@
 
     function setCurrentTimeToNextAyah() {
       if (audio.duration === undefined || audio.duration === null) return;
-      const ms = Math.floor(audio.currentTime * 1000);
       const count = getSurahAyahCount(currentSurah);
+      let targetAyah;
       if (selectedAyah === 999) return;
-      const targetAyah = selectedAyah >= count ? 999 : selectedAyah + 1;
+      if (selectedAyah === 0) targetAyah = 1;
+      else if (selectedAyah >= count) targetAyah = 999;
+      else targetAyah = selectedAyah + 1;
+
+      // Always record current audio time
+      const ms = Math.floor(audio.currentTime * 1000);
+
       updateTiming(currentSurah, targetAyah, ms);
       const row = document.querySelector(`.ayah-row[data-ayah="${targetAyah}"]`);
       if (row) {
@@ -1366,20 +1422,48 @@
       if (nextRow) nextRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
+    // Auto‑fill current ayah from previous ayah + 100 ms (key 'A')
+    function autoSetCurrentFromPrevious() {
+      if (selectedAyah <= 0) {
+        showToast('Cannot auto‑set ayah 0', 'warning');
+        return;
+      }
+      const prevKey = `${currentSurah},${selectedAyah - 1}`;
+      const prevTime = timings[prevKey];
+      if (prevTime === undefined || prevTime <= 0) {
+        showToast('Previous ayah has no timing', 'warning');
+        return;
+      }
+      const newTime = prevTime + 100;
+      updateTiming(currentSurah, selectedAyah, newTime);
+      const row = document.querySelector(`.ayah-row[data-ayah="${selectedAyah}"]`);
+      if (row) {
+        const inp = row.querySelector('input');
+        if (inp) inp.value = newTime;
+        refreshEditedVisuals(row, currentSurah, selectedAyah);
+      }
+      scheduleAutoPreview(currentSurah, selectedAyah, newTime);
+      showToast(`Ayah ${selectedAyah} set to ${newTime} ms`, 'success');
+    }
+
     function navigateAyah(dir, seekAudio = true) {
       const max = getSurahAyahCount(currentSurah);
-      let next = selectedAyah + dir;
-      if (next < 1) next = 1;
-      if (selectedAyah === max && dir === 1) next = 999;
-      else if (selectedAyah === 999 && dir === -1) next = max;
-      else if (next > max && next !== 999) next = 999;
-      if (next > 999) next = 999;
+      let next;
+      if (dir === 1) {
+        if (selectedAyah === 999) next = 999;
+        else if (selectedAyah === max) next = 999;
+        else next = selectedAyah + 1;
+      } else { // dir === -1
+        if (selectedAyah === 0) next = 0;
+        else if (selectedAyah === 999) next = max;
+        else next = selectedAyah - 1;
+      }
       selectedAyah = next;
       highlightSelected();
       saveCache();
       const r = document.querySelector(`.ayah-row[data-ayah="${selectedAyah}"]`);
       if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      if (seekAudio) {
+      if (seekAudio && selectedAyah !== 0) {
         const t = timings[`${currentSurah},${selectedAyah}`] !== undefined ? timings[`${currentSurah},${selectedAyah}`] : 0;
         if (audio.duration || audio.readyState >= 1) {
           audio.currentTime = t / 1000;
@@ -1455,6 +1539,7 @@
       switch (e.key) {
         case ' ': e.preventDefault(); playPauseBtn.click(); break;
         case 's': case 'S': case 'Enter': e.preventDefault(); setCurrentTimeToNextAyah(); break;
+        case 'a': case 'A': e.preventDefault(); autoSetCurrentFromPrevious(); break;
         case 'ArrowDown': e.preventDefault(); navigateAyah(1, !audio.paused); break;
         case 'ArrowUp': e.preventDefault(); navigateAyah(-1, !audio.paused); break;
         case 'ArrowRight': case '+': e.preventDefault(); nudgeSelected(getNudge()); break;
