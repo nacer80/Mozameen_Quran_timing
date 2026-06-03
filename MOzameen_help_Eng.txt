@@ -1,0 +1,92 @@
+  M⏱zameen  ⏱ز⏱ن
+A Verse Segmentation Tool – Quran Timing Editor
+Simply use the → ← keyboard arrow keys to segment verses and Enter to edit timings.
+
+Purpose of the Tool:
+
+The "MOzameen" tool helps you create and edit timing markers (in milliseconds) for each verse in any surah. These timings can be used to split a single audio file of a surah into separate audio segments for each verse, or to synchronize the audio with the text in Quran applications.
+
+Key Features:
+
+Load a Quran database "quran.db" (SQLite containing an ayah table) to display the Arabic text for each verse.
+
+Note: The Quran database "quran.db" supports the recitations of Jafs, Warsh, Qalun, etc.
+
+Import and export timing data in .db format (SQLite database) or .txt format (tab-separated text file).
+
+Set or edit the start time of each verse (and the 999th verse of the Surah) while listening to the audio file.
+
+Keyboard shortcuts for quick editing without needing the mouse.
+
+Play the entire Surah with the current verse automatically highlighted to verify the timing order.
+
+Preview any verse as you type a new timing – the audio plays for a few seconds at that moment.
+
+Data is automatically saved in the browser (IndexedDB) so you don't lose your work even after closing the page.
+
+How to use:
+
+Download the Quranic text (optional but recommended).
+
+Click "import quran.db" and select an SQLite file containing a table of verses with the columns: surah_num, ayah_num, ayah_imlai. (You can also drag and drop the file onto the page.)
+
+After loading, the Arabic text for each verse will appear next to its number.
+
+Downloading the Audio Recitation File
+
+Use "Folder MP3" (select a folder containing MP3 files) or "MP3 Files" (select multiple files).
+
+The tool automatically recognizes the surah associated with each audio file from its filename (e.g., 001.mp3, surah_1.mp3, 2.mp3).
+
+When you select a surah from the sidebar, its audio file is downloaded.
+
+Setting the Timing of Each Verse
+
+Select the surah from the left-hand menu.
+
+The right-hand panel displays all the verses with blank fields for the timing.
+
+Play the audio file. When you reach the beginning of a new verse, press S or Enter (or the ✂️ button) to set the current playback time as the start of the next verse.
+
+You can also type the time directly into the input field, or use the + and - buttons or the left and right arrows to increment or decrease the value by a fixed amount (the default is 100 milliseconds).
+
+The 🗑 button clears one timing, and the red "Clear Surah" button removes all timings for the current surah.
+
+Playback and Verification
+
+Press Play Surah to play the entire file with the current verse automatically highlighted according to your timings. If the timings are out of order, playback stops and an error message appears.
+
+Press the ▶ button in any verse row to play from the beginning.
+
+Use the Previous/Next buttons or the ↑↓ keys to navigate between verses (the audio will skip to the selected verse timing, if available).
+
+Preview Changes
+
+After entering a new value, the audio will play for a few seconds from that point (auto preview) to confirm the timing is correct. Playback stops after 3 seconds.
+
+Save Work
+
+All data is automatically saved to the browser's indexedDB.
+
+Use Export DB to load the timings database, or Export TXT to obtain a text file that other programs can read.
+
+Keyboard Shortcuts:
+
+Action Key
+Space: Play/Pause Audio
+S/Enter: Record the current audio time as the start of the next verse
+↑ (Up arrow): Skip to the previous verse (with audio scrolling)
+↓ (Down arrow): Skip to the next verse (with audio scrolling)
+→ / +: Increase the timing of the selected verse by the amount of the edit
+← / ​​-: Decrease the timing of the selected verse by the amount of the edit
+Delete: Clear the timing of the selected verse
+F: Toggle full-screen mode
+File Formats:
+
+Dib/TXT Timings File:
+
+The .db file is an SQLite database containing a table of timings (sura int, ayah int, time int).
+
+The .txt file contains columns: surah, ayah, and time, separated by tabs.
+
+Verse number 999 represents the total duration of the surah (end marker).
