@@ -378,6 +378,9 @@
     let autoPreviewToken = 0;
     let currentSearch = "";
 
+    // Precision stop scheduler
+    let stopScheduler = null;   // { cancel: fn }
+
     const audio = document.getElementById('audioPlayer');
     const seekBar = document.getElementById('seekBar');
     const playPauseBtn = document.getElementById('playPauseBtn');
@@ -407,7 +410,74 @@
       }, 2600);
     }
 
-    /* ==================== AUTO PREVIEW ==================== */
+    // ---------- precision stop ----------
+    function cancelPrecisionStop() {
+      if (stopScheduler) {
+        stopScheduler.cancel();
+        stopScheduler = null;
+      }
+    }
+
+    function schedulePrecisionStop(endMs) {
+      cancelPrecisionStop();
+      if (endMs === undefined || endMs === null || !audio.duration) return;
+
+      const startMs = audio.currentTime * 1000;
+      if (endMs <= startMs) {
+        audio.pause();
+        return;
+      }
+
+      const remainingContentMs = endMs - startMs;
+      const speed = audio.playbackRate || 1;
+      const realRemainingMs = remainingContentMs / speed;
+
+      let timeoutId = null;
+      let rafId = null;
+      let cancelled = false;
+
+      const stopNow = () => {
+        if (!cancelled) {
+          cancelled = true;
+          if (timeoutId) clearTimeout(timeoutId);
+          if (rafId) cancelAnimationFrame(rafId);
+          stopScheduler = null;
+          if (!audio.paused) audio.pause();
+        }
+      };
+
+      const poll = () => {
+        if (cancelled) return;
+        if (audio.paused) {
+          stopNow();
+          return;
+        }
+        const currentMs = audio.currentTime * 1000;
+        if (currentMs >= endMs - 0.5) { // tiny tolerance
+          audio.pause();
+          stopNow();
+        } else {
+          rafId = requestAnimationFrame(poll);
+        }
+      };
+
+      const schedulePoll = () => {
+        if (cancelled) return;
+        rafId = requestAnimationFrame(poll);
+      };
+
+      // Fire a timeout slightly before the target, then poll precisely
+      const leadMs = Math.min(realRemainingMs, 200); // at most 200ms lead
+      const delay = Math.max(0, realRemainingMs - leadMs);
+      timeoutId = setTimeout(() => {
+        if (cancelled) return;
+        schedulePoll();
+      }, delay);
+
+      stopScheduler = { cancel: stopNow };
+    }
+
+    // ==================== AUTO PREVIEW ====================
     function scheduleAutoPreview(sura, ayah, ms) {
       clearTimeout(autoPreviewTimer);
       clearTimeout(autoPreviewStopTimer);
@@ -530,6 +600,15 @@
       }
     }
 
+    function defaultExportExcluded() {
+      const set = new Set();
+      for (let i = 1; i <= 114; i++) {
+        set.add(`${i},0`);
+        set.add(`${i},999`);
+      }
+      return set;
+    }
+
     async function loadCache() {
       const bin = await idbGet('db');
       if (bin) {
@@ -544,7 +623,11 @@
       const comp = await idbGet('completed');
       if (Array.isArray(comp)) completedSurahs = new Set(comp);
       const exc = await idbGet('exportExcluded');
-      if (Array.isArray(exc)) exportExcluded = new Set(exc);
+      if (exc && Array.isArray(exc)) {
+        exportExcluded = new Set(exc);
+      } else {
+        exportExcluded = defaultExportExcluded();
+      }
       const cs = await idbGet('currentSurah');
       if (typeof cs === 'number' && cs >= 1 && cs <= 114) currentSurah = cs;
       const sa = await idbGet('selectedAyah');
@@ -582,7 +665,7 @@
       timings = {};
       originalTimings = {};
       completedSurahs.clear();
-      exportExcluded.clear();
+      exportExcluded = defaultExportExcluded();
       saveCache();
       renderSurahList();
       renderAyahList();
@@ -601,6 +684,18 @@
         stmt.free();
       } catch (e) {
         sqlDb.run('CREATE TABLE IF NOT EXISTS timings(sura int, ayah int, time int, primary key(sura,ayah))');
+      }
+    }
+
+    // Helper: reset exportExcluded for a set of surahs to unchecked, then un-exclude any that actually exist
+    function resetExportExclusionForSurahs(surahSet) {
+      for (const sura of surahSet) {
+        const k0 = `${sura},0`;
+        const k999 = `${sura},999`;
+        exportExcluded.add(k0);
+        exportExcluded.add(k999);
+        if (timings[k0] !== undefined) exportExcluded.delete(k0);
+        if (timings[k999] !== undefined) exportExcluded.delete(k999);
       }
     }
 
@@ -649,6 +744,7 @@
           if (!header.includes('sura') || !header.includes('ayah') || !header.includes('time')) throw new Error('Invalid header');
 
           const newTimings = {};
+          const surahSet = new Set();
           for (let i = 1; i < lines.length; i++) {
             const p = lines[i].split('\t');
             if (p.length < 3) continue;
@@ -657,6 +753,7 @@
             const time = safeInt(p[2], NaN);
             if (!Number.isFinite(sura) || !Number.isFinite(ayah) || !Number.isFinite(time)) continue;
             newTimings[`${sura},${ayah}`] = time;
+            surahSet.add(sura);
           }
 
           sqlDb = new SQL.Database();
@@ -669,6 +766,7 @@
           stmt.free();
           loadTimingsFromDb();
           originalTimings = clone(timings);
+          resetExportExclusionForSurahs(surahSet);   // <-- only for imported surahs
           saveCache();
           renderSurahList();
           selectSurah(currentSurah || 1, false);
@@ -687,6 +785,14 @@
           sqlDb = new SQL.Database(new Uint8Array(e.target.result));
           loadTimingsFromDb();
           originalTimings = clone(timings);
+
+          // Collect surahs present in this DB
+          const surahSet = new Set();
+          for (const key of Object.keys(timings)) {
+            const sura = parseInt(key.split(',')[0], 10);
+            if (sura >= 1 && sura <= 114) surahSet.add(sura);
+          }
+          resetExportExclusionForSurahs(surahSet);   // <-- only for surahs with data
           saveCache();
           renderSurahList();
           selectSurah(currentSurah || 1, false);
@@ -715,7 +821,6 @@
     async function exportTxt() {
       const exportData = collectExportTimings();
       if (exportData.length === 0) return alert('No timings to export.');
-      // No need to sort - we already build rows in the correct order
       let txt = 'sura\tayah\ttime\n';
       for (const row of exportData) {
         txt += `${row.sura}\t${row.ayah}\t${row.time}\n`;
@@ -777,7 +882,7 @@
       timings[key] = t;
       if (sqlDb) sqlDb.run('INSERT OR REPLACE INTO timings VALUES (?,?,?)', [sura, ayah, t]);
       saveCache();
-      if (ayah !== 0) updateSurahProgress(sura);   // ayah 0 doesn't affect progress
+      if (ayah !== 0) updateSurahProgress(sura);
     }
 
     function nudgeTiming(sura, ayah, delta) {
@@ -882,6 +987,7 @@
         URL.revokeObjectURL(audioURL);
         audioURL = null;
       }
+      cancelPrecisionStop();
       const file = audioFiles[s];
       if (file) {
         audioURL = URL.createObjectURL(file);
@@ -950,11 +1056,11 @@
       updateAyahPlayButtons();
       if (audio.paused) return;
 
-      const ms = Math.floor((audio.currentTime || 0) * 1000);
       if (isPlayingWholeSurah) {
         const orderCheck = checkTimingOrder(currentSurah);
         if (!orderCheck.valid) {
           audio.pause();
+          cancelPrecisionStop();
           isPlayingWholeSurah = false;
           updatePlaySurahButton();
           selectedAyah = orderCheck.ayah;
@@ -965,6 +1071,7 @@
           return;
         }
 
+        const ms = Math.floor((audio.currentTime || 0) * 1000);
         const active = getActiveAyah(currentSurah, ms);
         if (active !== selectedAyah) {
           selectedAyah = active;
@@ -973,20 +1080,6 @@
           if (activeRow) activeRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
           saveCache();
         }
-
-        const endMarker = timings[`${currentSurah},999`];
-        if (endMarker !== undefined && ms >= endMarker) {
-          audio.pause();
-          isPlayingWholeSurah = false;
-          updatePlaySurahButton();
-          selectedAyah = 999;
-          highlightSelected();
-          const endRow = document.querySelector('.ayah-row[data-ayah="999"]');
-          if (endRow) endRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      } else {
-        const stopMs = getEditStopMs(currentSurah, selectedAyah);
-        if (stopMs !== undefined && ms >= stopMs) audio.pause();
       }
     });
 
@@ -996,10 +1089,12 @@
     });
     audio.addEventListener('pause', () => {
       playPauseBtn.textContent = '▶';
+      cancelPrecisionStop();
       updateAyahPlayButtons();
     });
     audio.addEventListener('ended', () => {
       playPauseBtn.textContent = '▶';
+      cancelPrecisionStop();
       if (isPlayingWholeSurah) {
         isPlayingWholeSurah = false;
         updatePlaySurahButton();
@@ -1012,12 +1107,19 @@
       updateAyahPlayButtons();
     });
 
-    seekBar.oninput = () => { clearTimeout(autoPreviewTimer); clearTimeout(autoPreviewStopTimer); autoPreviewToken += 1; audio.currentTime = parseFloat(seekBar.value); };
+    seekBar.oninput = () => {
+      clearTimeout(autoPreviewTimer);
+      clearTimeout(autoPreviewStopTimer);
+      autoPreviewToken += 1;
+      cancelPrecisionStop();
+      audio.currentTime = parseFloat(seekBar.value);
+    };
 
     playPauseBtn.onclick = () => {
       clearTimeout(autoPreviewTimer);
       clearTimeout(autoPreviewStopTimer);
       autoPreviewToken += 1;
+      cancelPrecisionStop();
       if (audio.paused) {
         const t = timings[`${currentSurah},${selectedAyah}`];
         if (t !== undefined && audio.duration) {
@@ -1036,13 +1138,18 @@
       clearTimeout(autoPreviewTimer);
       clearTimeout(autoPreviewStopTimer);
       autoPreviewToken += 1;
+      cancelPrecisionStop();
       const t = timings[`${currentSurah},${selectedAyah}`];
       if (t !== undefined && audio.duration) {
         audio.currentTime = t / 1000;
         updatePlayerUI();
         isPlayingWholeSurah = false;
         updatePlaySurahButton();
-        audio.play().catch(e => console.warn('Playback failed', e));
+        const stopMs = getEditStopMs(currentSurah, selectedAyah);
+        const playPromise = audio.play();
+        if (playPromise) playPromise.then(() => {
+          if (stopMs !== undefined) schedulePrecisionStop(stopMs);
+        }).catch(e => console.warn('Playback failed', e));
       }
     }
 
@@ -1050,6 +1157,7 @@
       clearTimeout(autoPreviewTimer);
       clearTimeout(autoPreviewStopTimer);
       autoPreviewToken += 1;
+      cancelPrecisionStop();
       if (audio.paused) playWholeSurah();
       else {
         audio.pause();
@@ -1062,6 +1170,7 @@
       clearTimeout(autoPreviewTimer);
       clearTimeout(autoPreviewStopTimer);
       autoPreviewToken += 1;
+      cancelPrecisionStop();
       const orderCheck = checkTimingOrder(currentSurah);
       if (!orderCheck.valid) {
         showToast(`Cannot play: timing order broken at ayah ${orderCheck.ayah}`, 'warning');
@@ -1077,7 +1186,11 @@
         updatePlayerUI();
         isPlayingWholeSurah = true;
         updatePlaySurahButton();
-        audio.play().catch(e => console.warn('Playback failed', e));
+        const endMarker = timings[`${currentSurah},999`];
+        const playPromise = audio.play();
+        if (playPromise) playPromise.then(() => {
+          if (endMarker !== undefined) schedulePrecisionStop(endMarker);
+        }).catch(e => console.warn('Playback failed', e));
       }
     }
 
@@ -1216,6 +1329,7 @@
         e.stopPropagation();
         if (!audio.paused && getActiveAyah(currentSurah, Math.floor(audio.currentTime * 1000)) === ayah) {
           audio.pause();
+          cancelPrecisionStop();
           isPlayingWholeSurah = false;
           updatePlaySurahButton();
           updateAyahPlayButtons();
@@ -1231,7 +1345,11 @@
           isPlayingWholeSurah = false;
           updatePlaySurahButton();
           btnPlay.textContent = '⏸';
-          audio.play().catch(e => {
+          const stopMs = getEditStopMs(sura, ayah);
+          const playPromise = audio.play();
+          if (playPromise) playPromise.then(() => {
+            if (stopMs !== undefined) schedulePrecisionStop(stopMs);
+          }).catch(e => {
             console.warn('Playback failed', e);
             btnPlay.textContent = '▶';
           });
@@ -1381,6 +1499,7 @@
       if (!confirm(`Clear ALL timing data for Surah ${s.i} — ${s.a}?`)) return;
       if (!audio.paused) {
         audio.pause();
+        cancelPrecisionStop();
         isPlayingWholeSurah = false;
         updatePlaySurahButton();
       }
@@ -1403,7 +1522,6 @@
       else if (selectedAyah >= count) targetAyah = 999;
       else targetAyah = selectedAyah + 1;
 
-      // Always record current audio time (original behaviour)
       const ms = Math.floor(audio.currentTime * 1000);
 
       updateTiming(currentSurah, targetAyah, ms);
@@ -1421,7 +1539,6 @@
       if (nextRow) nextRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
-    // Auto‑fill current ayah from previous ayah + 100 ms (key 'A')
     function autoSetCurrentFromPrevious() {
       if (selectedAyah <= 0) {
         showToast('Cannot auto‑set ayah 0', 'warning');
@@ -1452,7 +1569,7 @@
         if (selectedAyah === 999) next = 999;
         else if (selectedAyah === max) next = 999;
         else next = selectedAyah + 1;
-      } else { // dir === -1
+      } else {
         if (selectedAyah === 0) next = 0;
         else if (selectedAyah === 999) next = max;
         else next = selectedAyah - 1;
