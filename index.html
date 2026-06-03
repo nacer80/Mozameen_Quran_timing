@@ -715,7 +715,7 @@
     async function exportTxt() {
       const exportData = collectExportTimings();
       if (exportData.length === 0) return alert('No timings to export.');
-      exportData.sort((a, b) => a.sura !== b.sura ? a.sura - b.sura : a.ayah - b.ayah);
+      // No need to sort - we already build rows in the correct order
       let txt = 'sura\tayah\ttime\n';
       for (const row of exportData) {
         txt += `${row.sura}\t${row.ayah}\t${row.time}\n`;
@@ -728,17 +728,16 @@
       const rows = [];
       for (let sura = 1; sura <= 114; sura++) {
         const count = getSurahAyahCount(sura);
-        // Always include ayahs 1..count
-        for (let a = 1; a <= count; a++) {
-          const key = `${sura},${a}`;
-          const time = timings[key] !== undefined ? timings[key] : 0;
-          rows.push({ sura, ayah: a, time });
-        }
-        // Include ayah 0 only if not excluded (checkbox checked)
+        // 1. Ayah 0 (if included)
         if (!exportExcluded.has(`${sura},0`)) {
           rows.push({ sura, ayah: 0, time: timings[`${sura},0`] || 0 });
         }
-        // Include ayah 999 only if not excluded
+        // 2. Ayahs 1..count (always included)
+        for (let a = 1; a <= count; a++) {
+          const time = timings[`${sura},${a}`] !== undefined ? timings[`${sura},${a}`] : 0;
+          rows.push({ sura, ayah: a, time });
+        }
+        // 3. Ayah 999 (if included)
         if (!exportExcluded.has(`${sura},999`)) {
           rows.push({ sura, ayah: 999, time: timings[`${sura},999`] || 0 });
         }
@@ -1404,7 +1403,7 @@
       else if (selectedAyah >= count) targetAyah = 999;
       else targetAyah = selectedAyah + 1;
 
-      // Always record current audio time
+      // Always record current audio time (original behaviour)
       const ms = Math.floor(audio.currentTime * 1000);
 
       updateTiming(currentSurah, targetAyah, ms);
